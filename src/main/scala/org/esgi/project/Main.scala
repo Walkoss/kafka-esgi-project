@@ -1,5 +1,6 @@
 package org.esgi.project
 
+import java.time.Instant
 import java.util.{Properties, UUID}
 
 import akka.actor.ActorSystem
@@ -13,14 +14,16 @@ import org.apache.kafka.streams.kstream.{KGroupedStream => _, KStream => _, KTab
 import org.apache.kafka.streams.scala.ImplicitConversions._
 import org.apache.kafka.streams.scala._
 import org.apache.kafka.streams.scala.kstream.{TimeWindowedKStream, _}
-import org.apache.kafka.streams.state.QueryableStoreTypes
+import org.apache.kafka.streams.state.{QueryableStoreTypes, ReadOnlyKeyValueStore, ReadOnlyWindowStore, WindowStoreIterator}
 import org.apache.kafka.streams.{KafkaStreams, StreamsConfig, Topology}
-import org.esgi.project.models.{Error, Like, Movie, MovieStat, View}
+import org.esgi.project.models.{Error, Like, Movie, MovieStats, Stat, View}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.json.Json
 
 import scala.concurrent.ExecutionContextExecutor
 import scala.concurrent.duration._
+import scala.collection.JavaConverters._
+import scala.util.Try
 
 object Main extends PlayJsonSupport {
 
@@ -42,9 +45,9 @@ object Main extends PlayJsonSupport {
 
   // Store names
   val randomUuid: String = UUID.randomUUID.toString
-  val viewsGroupedByMovieCountStoreName: String = s"viewsGroupedByMovie-$randomUuid"
-  val viewsGroupedByMovieAndViewCategory1minStoreName: String = s"viewsGroupedByMovieAndViewCategory1min-$randomUuid"
-  val viewsGroupedByMovieAndViewCategory5minStoreName: String = s"viewsGroupedByMovieAndViewCategory5min-$randomUuid"
+  val viewsGroupedByMovieFullStoreName: String = s"viewsGroupedByMovie-$randomUuid"
+  val viewsGroupedByMovie1minStoreName: String = s"viewsGroupedByMovie1min-$randomUuid"
+  val viewsGroupedByMovie5minStoreName: String = s"viewsGroupedByMovie5min-$randomUuid"
 
   val streams: KafkaStreams = new KafkaStreams(buildProcessingGraph, props)
   streams.start()
@@ -65,47 +68,59 @@ object Main extends PlayJsonSupport {
     val likesStream: KStream[String, Like] = builder.stream[String, String]("likes")
       .mapValues(value => Json.parse(value).as[Like])
 
+    viewsStream.print(Printed.toSysOut())
+
     // Views grouped by movie
     val viewsGroupedByMovie: KGroupedStream[String, View] = viewsStream.groupByKey(Serialized.`with`(Serdes.String, View.serdes))
 
-    //     Views grouped by movie and view category
-    val viewsGroupedByMovieAndViewCategory: KGroupedStream[String, View] = viewsStream
-      .selectKey((k, v) => k + '-' + v.viewCategory).groupByKey(Serialized.`with`(Serdes.String, View.serdes))
-
-    val viewsGroupedByMovieAndViewCategory1min: TimeWindowedKStream[String, View] = viewsGroupedByMovieAndViewCategory
+    val viewsGroupedByMovie1min: TimeWindowedKStream[String, View] = viewsGroupedByMovie
       .windowedBy(TimeWindows.of(1.minute.toMillis).advanceBy(10.second.toMillis))
 
-    val viewsGroupedByMovieAndViewCategory5min: TimeWindowedKStream[String, View] = viewsGroupedByMovieAndViewCategory
+    val viewsGroupedByMovie5min: TimeWindowedKStream[String, View] = viewsGroupedByMovie
       .windowedBy(TimeWindows.of(5.minute.toMillis).advanceBy(1.minute.toMillis))
 
-    def updateMovieStat(view: View, movie: Movie): Movie = {
+    def updateMoviePastStat(view: View, movie: Movie): Movie = {
       view.viewCategory match {
         case "start_only" => {
-          movie.copy(id = view.id, title = view.title, viewCount = movie.viewCount + 1, stat = movie.stat.copy(startOnly = movie.stat.startOnly + 1))
+          movie.copy(id = view.id, title = view.title, viewCount = movie.viewCount + 1, stats = movie.stats.copy(past = movie.stats.past.copy(startOnly = movie.stats.past.startOnly + 1)))
         }
         case "half" => {
-          movie.copy(id = view.id, title = view.title, viewCount = movie.viewCount + 1, stat = movie.stat.copy(half = movie.stat.half + 1))
+          movie.copy(id = view.id, title = view.title, viewCount = movie.viewCount + 1, stats = movie.stats.copy(past = movie.stats.past.copy(half = movie.stats.past.half + 1)))
         }
         case "full" => {
-          movie.copy(id = view.id, title = view.title, viewCount = movie.viewCount + 1, stat = movie.stat.copy(full = movie.stat.full + 1))
+          movie.copy(id = view.id, title = view.title, viewCount = movie.viewCount + 1, stats = movie.stats.copy(past = movie.stats.past.copy(full = movie.stats.past.full + 1)))
+        }
+      }
+    }
+
+    def updateStat(view: View, stat: Stat): Stat = {
+      view.viewCategory match {
+        case "start_only" => {
+          stat.copy(startOnly = stat.startOnly + 1)
+        }
+        case "half" => {
+          stat.copy(half = stat.half + 1)
+        }
+        case "full" => {
+          stat.copy(full = stat.full + 1)
         }
       }
     }
 
     viewsGroupedByMovie
       .aggregate(
-        Movie(id = 0, title = "", viewCount = 0, stat = MovieStat())
-      )((_, v, m) => updateMovieStat(v, m))(Materialized.as(viewsGroupedByMovieCountStoreName).withValueSerde(Movie.serdes))
+        Movie(id = 0, title = "", viewCount = 0, stats = MovieStats(past = Stat(), lastMinute = Stat(), lastFiveMinutes = Stat()))
+      )((_, v, m) => updateMoviePastStat(v, m))(Materialized.as(viewsGroupedByMovieFullStoreName).withValueSerde(Movie.serdes))
 
-    viewsGroupedByMovieAndViewCategory1min
+    viewsGroupedByMovie1min
       .aggregate(
-        Movie(id = 0, title = "", viewCount = 0, stat = MovieStat())
-      )((_, v, m) => updateMovieStat(v, m))(Materialized.as(viewsGroupedByMovieCountStoreName).withValueSerde(Movie.serdes))
+        Stat()
+      )((_, v, s) => updateStat(v, s))(Materialized.as(viewsGroupedByMovie1minStoreName).withValueSerde(Stat.serdes))
 
-    viewsGroupedByMovieAndViewCategory5min
+    viewsGroupedByMovie5min
       .aggregate(
-        Movie(id = 0, title = "", viewCount = 0, stat = MovieStat())
-      )((_, v, m) => updateMovieStat(v, m))(Materialized.as(viewsGroupedByMovieCountStoreName).withValueSerde(Movie.serdes))
+        Stat()
+      )((_, v, s) => updateStat(v, s))(Materialized.as(viewsGroupedByMovie5minStoreName).withValueSerde(Stat.serdes))
 
 
     builder.build()
@@ -115,11 +130,22 @@ object Main extends PlayJsonSupport {
   val route: Route =
     path("movies" / IntNumber) { id: Int =>
       get {
-        val viewsGroupedByMovieCountStore = streams.store(viewsGroupedByMovieCountStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
+        val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
+        val viewsGroupedByMovie1minStore: ReadOnlyWindowStore[String, Stat] = streams.store(viewsGroupedByMovie1minStoreName, QueryableStoreTypes.windowStore[String, Stat]())
+        val viewsGroupedByMovie5minStore: ReadOnlyWindowStore[String, Stat] = streams.store(viewsGroupedByMovie5minStoreName, QueryableStoreTypes.windowStore[String, Stat]())
+        val toTime = Instant.now().toEpochMilli
         val movie = viewsGroupedByMovieCountStore.get(id.toString)
 
         movie match {
-          case movie: Movie => complete(movie)
+          case movie: Movie => {
+            val movieStat1minStoreWindowStores: WindowStoreIterator[Stat] = viewsGroupedByMovie1minStore.fetch(movie.id.toString, toTime - 1.minute.toMillis, toTime)
+            val movieStats1min = Try(movieStat1minStoreWindowStores.asScala.toList.last.value).getOrElse(Stat())
+
+            val movieStat5minStoreWindowStores: WindowStoreIterator[Stat] = viewsGroupedByMovie5minStore.fetch(movie.id.toString, toTime - 5.minute.toMillis, toTime)
+            val movieStats5min = Try(movieStat5minStoreWindowStores.asScala.toList.last.value).getOrElse(Stat())
+
+            complete(movie.copy(stats = movie.stats.copy(lastMinute = movieStats1min, lastFiveMinutes = movieStats5min)))
+          }
           case _ => complete((404, Error(message = s"Movie $id not found")))
         }
       }
