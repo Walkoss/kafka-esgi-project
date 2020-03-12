@@ -16,7 +16,7 @@ import org.apache.kafka.streams.scala._
 import org.apache.kafka.streams.scala.kstream.{TimeWindowedKStream, _}
 import org.apache.kafka.streams.state.{KeyValueIterator, QueryableStoreTypes, ReadOnlyKeyValueStore, ReadOnlyWindowStore, WindowStoreIterator}
 import org.apache.kafka.streams.{KafkaStreams, StreamsConfig, Topology}
-import org.esgi.project.models.{Error, Like, Movie, MovieStats, Stat, View}
+import org.esgi.project.models.{Error, Like, Movie, MovieLike, MovieLikes, MovieStats, Stat, View}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.json.Json
 
@@ -45,6 +45,7 @@ object Main extends PlayJsonSupport {
 
   // Store names
   val randomUuid: String = UUID.randomUUID.toString
+  val movieLikesGroupedByMovieStoreName: String = s"movieLikesGroupedByMovie-$randomUuid"
   val viewsGroupedByMovieFullStoreName: String = s"viewsGroupedByMovie-$randomUuid"
   val viewsGroupedByMovie1minStoreName: String = s"viewsGroupedByMovie1min-$randomUuid"
   val viewsGroupedByMovie5minStoreName: String = s"viewsGroupedByMovie5min-$randomUuid"
@@ -68,10 +69,23 @@ object Main extends PlayJsonSupport {
     val likesStream: KStream[String, Like] = builder.stream[String, String]("likes")
       .mapValues(value => Json.parse(value).as[Like])
 
-    //    viewsStream.print(Printed.toSysOut())
+    val viewsLikesStream = viewsStream
+      .join(likesStream)(
+        (view: View, like: Like) => {
+          MovieLike(title = view.title, score = like.score)
+        },
+        JoinWindows.of(30.seconds.toMillis)
+      )(Joined.`with`(Serdes.String, View.serdes, Like.serdes))
 
     // Views grouped by movie
     val viewsGroupedByMovie: KGroupedStream[String, View] = viewsStream.groupByKey(Serialized.`with`(Serdes.String, View.serdes))
+
+    // View likes grouped by movie
+    val viewsLikesGroupedByMovie: KGroupedStream[String, MovieLike] = viewsLikesStream.groupByKey(Serialized.`with`(Serdes.String, MovieLike.serdes))
+    viewsLikesGroupedByMovie.aggregate(MovieLikes()
+    )((_: String, v: MovieLike, ml: MovieLikes) => {
+      ml.copy(title = v.title, movieLikesCount = ml.movieLikesCount + 1, score = ml.score + v.score)
+    })(Materialized.as(movieLikesGroupedByMovieStoreName).withValueSerde(MovieLikes.serdes))
 
     val viewsGroupedByMovie1min: TimeWindowedKStream[String, View] = viewsGroupedByMovie
       .windowedBy(TimeWindows.of(1.minute.toMillis).advanceBy(10.second.toMillis))
@@ -122,7 +136,6 @@ object Main extends PlayJsonSupport {
         Stat()
       )((_, v, s) => updateStat(v, s))(Materialized.as(viewsGroupedByMovie5minStoreName).withValueSerde(Stat.serdes))
 
-
     builder.build()
   }
 
@@ -152,18 +165,30 @@ object Main extends PlayJsonSupport {
           }
         }
       },
-      path("stats" / "ten" / "best" / "views") {
-        get {
-          val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
-          val movieIterator: KeyValueIterator[String, Movie] = viewsGroupedByMovieCountStore.all()
-          complete(movieIterator.asScala.toList.map(x => x.value).sortBy(_.viewCount).reverse.take(10))
+      path("stats" / "ten" / Segment / "views") {
+        segment: String => {
+          get {
+            val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
+            val movieIterator: KeyValueIterator[String, Movie] = viewsGroupedByMovieCountStore.all()
+            val sorted: List[Movie] = movieIterator.asScala.toList.map(x => x.value).sortBy(_.viewCount)
+            segment match {
+              case "best" => complete(sorted.reverse.take(10))
+              case "worst" => complete(sorted.take(10))
+            }
+          }
         }
       },
-      path("stats" / "ten" / "worst" / "views") {
-        get {
-          val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
-          val movieIterator: KeyValueIterator[String, Movie] = viewsGroupedByMovieCountStore.all()
-          complete(movieIterator.asScala.toList.map(x => x.value).sortBy(_.viewCount).take(10))
+      path("stats" / "ten" / Segment / "score") {
+        segment: String => {
+          get {
+            val likesGroupedByMovieStore: ReadOnlyKeyValueStore[String, MovieLikes] = streams.store(movieLikesGroupedByMovieStoreName, QueryableStoreTypes.keyValueStore[String, MovieLikes]())
+            val movieIterator: KeyValueIterator[String, MovieLikes] = likesGroupedByMovieStore.all()
+            val sorted: List[MovieLikes] = movieIterator.asScala.toList.map(x => x.value.copy(score = x.value.score / x.value.movieLikesCount)).sortBy(_.score)
+            segment match {
+              case "best" => complete(sorted.reverse.take(10))
+              case "worst" => complete(sorted.take(10))
+            }
+          }
         }
       }
     )
