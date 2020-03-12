@@ -158,6 +158,13 @@ object Main extends PlayJsonSupport {
           val movieIterator: KeyValueIterator[String, Movie] = viewsGroupedByMovieCountStore.all()
           complete(movieIterator.asScala.toList.map(x => x.value).sortBy(_.viewCount).reverse.take(10))
         }
+      },
+      path("stats" / "ten" / "worst" / "views") {
+        get {
+          val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
+          val movieIterator: KeyValueIterator[String, Movie] = viewsGroupedByMovieCountStore.all()
+          complete(movieIterator.asScala.toList.map(x => x.value).sortBy(_.viewCount).take(10))
+        }
       }
     )
   }
