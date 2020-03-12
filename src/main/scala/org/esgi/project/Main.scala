@@ -14,7 +14,7 @@ import org.apache.kafka.streams.kstream.{KGroupedStream => _, KStream => _, KTab
 import org.apache.kafka.streams.scala.ImplicitConversions._
 import org.apache.kafka.streams.scala._
 import org.apache.kafka.streams.scala.kstream.{TimeWindowedKStream, _}
-import org.apache.kafka.streams.state.{QueryableStoreTypes, ReadOnlyKeyValueStore, ReadOnlyWindowStore, WindowStoreIterator}
+import org.apache.kafka.streams.state.{KeyValueIterator, QueryableStoreTypes, ReadOnlyKeyValueStore, ReadOnlyWindowStore, WindowStoreIterator}
 import org.apache.kafka.streams.{KafkaStreams, StreamsConfig, Topology}
 import org.esgi.project.models.{Error, Like, Movie, MovieStats, Stat, View}
 import org.slf4j.{Logger, LoggerFactory}
@@ -68,7 +68,7 @@ object Main extends PlayJsonSupport {
     val likesStream: KStream[String, Like] = builder.stream[String, String]("likes")
       .mapValues(value => Json.parse(value).as[Like])
 
-    viewsStream.print(Printed.toSysOut())
+    //    viewsStream.print(Printed.toSysOut())
 
     // Views grouped by movie
     val viewsGroupedByMovie: KGroupedStream[String, View] = viewsStream.groupByKey(Serialized.`with`(Serdes.String, View.serdes))
@@ -127,33 +127,43 @@ object Main extends PlayJsonSupport {
   }
 
 
-  val route: Route =
-    path("movies" / IntNumber) { id: Int =>
-      get {
-        val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
-        val viewsGroupedByMovie1minStore: ReadOnlyWindowStore[String, Stat] = streams.store(viewsGroupedByMovie1minStoreName, QueryableStoreTypes.windowStore[String, Stat]())
-        val viewsGroupedByMovie5minStore: ReadOnlyWindowStore[String, Stat] = streams.store(viewsGroupedByMovie5minStoreName, QueryableStoreTypes.windowStore[String, Stat]())
-        val toTime = Instant.now().toEpochMilli
-        val movie = viewsGroupedByMovieCountStore.get(id.toString)
+  def routes(): Route = {
+    concat(
+      path("movies" / IntNumber) { id: Int =>
+        get {
+          val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
+          val movie = viewsGroupedByMovieCountStore.get(id.toString)
 
-        movie match {
-          case movie: Movie => {
-            val movieStat1minStoreWindowStores: WindowStoreIterator[Stat] = viewsGroupedByMovie1minStore.fetch(movie.id.toString, toTime - 1.minute.toMillis, toTime)
-            val movieStats1min = Try(movieStat1minStoreWindowStores.asScala.toList.last.value).getOrElse(Stat())
+          movie match {
+            case movie: Movie => {
+              val toTime = Instant.now().toEpochMilli
+              val viewsGroupedByMovie1minStore: ReadOnlyWindowStore[String, Stat] = streams.store(viewsGroupedByMovie1minStoreName, QueryableStoreTypes.windowStore[String, Stat]())
+              val viewsGroupedByMovie5minStore: ReadOnlyWindowStore[String, Stat] = streams.store(viewsGroupedByMovie5minStoreName, QueryableStoreTypes.windowStore[String, Stat]())
 
-            val movieStat5minStoreWindowStores: WindowStoreIterator[Stat] = viewsGroupedByMovie5minStore.fetch(movie.id.toString, toTime - 5.minute.toMillis, toTime)
-            val movieStats5min = Try(movieStat5minStoreWindowStores.asScala.toList.last.value).getOrElse(Stat())
+              val movieStat1minStoreWindowStores: WindowStoreIterator[Stat] = viewsGroupedByMovie1minStore.fetch(movie.id.toString, toTime - 1.minute.toMillis, toTime)
+              val movieStats1min = Try(movieStat1minStoreWindowStores.asScala.toList.last.value).getOrElse(Stat())
 
-            complete(movie.copy(stats = movie.stats.copy(lastMinute = movieStats1min, lastFiveMinutes = movieStats5min)))
+              val movieStat5minStoreWindowStores: WindowStoreIterator[Stat] = viewsGroupedByMovie5minStore.fetch(movie.id.toString, toTime - 5.minute.toMillis, toTime)
+              val movieStats5min = Try(movieStat5minStoreWindowStores.asScala.toList.last.value).getOrElse(Stat())
+
+              complete(movie.copy(stats = movie.stats.copy(lastMinute = movieStats1min, lastFiveMinutes = movieStats5min)))
+            }
+            case _ => complete((404, Error(message = s"Movie $id not found")))
           }
-          case _ => complete((404, Error(message = s"Movie $id not found")))
+        }
+      },
+      path("stats" / "ten" / "best" / "views") {
+        get {
+          val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
+          val movieIterator: KeyValueIterator[String, Movie] = viewsGroupedByMovieCountStore.all()
+          complete(movieIterator.asScala.toList.map(x => x.value).sortBy(_.viewCount).reverse.take(10))
         }
       }
-    }
-
+    )
+  }
 
   def main(args: Array[String]) {
-    Http().bindAndHandle(route, "0.0.0.0", 8080)
+    Http().bindAndHandle(routes(), "0.0.0.0", 8080)
     logger.info(s"App started on 8080")
   }
 }
