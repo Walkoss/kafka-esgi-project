@@ -62,12 +62,13 @@ object Main extends PlayJsonSupport {
 
     val builder: StreamsBuilder = new StreamsBuilder
 
-    // TODO: check error on parsing
     val viewsStream: KStream[String, View] = builder.stream[String, String]("views")
-      .mapValues(value => Json.parse(value).as[View])
+      .mapValues(value => Try(Json.parse(value).as[View]).getOrElse(View(id = None)))
+      .filter((_, v) => v.id.isDefined)
 
     val likesStream: KStream[String, Like] = builder.stream[String, String]("likes")
-      .mapValues(value => Json.parse(value).as[Like])
+      .mapValues(value => Try(Json.parse(value).as[Like]).getOrElse(Like(id = None)))
+      .filter((_, v) => v.id.isDefined)
 
     // Views grouped by movie
     val viewsGroupedByMovie: KGroupedStream[String, View] = viewsStream.groupByKey(Serialized.`with`(Serdes.String, View.serdes))
@@ -76,7 +77,7 @@ object Main extends PlayJsonSupport {
     val likesGrouppedByMovie: KGroupedStream[String, Like] = likesStream.groupByKey(Serialized.`with`(Serdes.String, Like.serdes))
     likesGrouppedByMovie.aggregate(MovieLikes()
     )((_: String, v: Like, ml: MovieLikes) => {
-      ml.copy(id = v.id, movieLikesCount = ml.movieLikesCount + 1, score = ml.score + v.score)
+      ml.copy(id = v.id.get, movieLikesCount = ml.movieLikesCount + 1, score = ml.score + v.score)
     })(Materialized.as(movieLikesGroupedByMovieStoreName).withValueSerde(MovieLikes.serdes))
 
     val viewsGroupedByMovie1min: TimeWindowedKStream[String, View] = viewsGroupedByMovie
@@ -88,13 +89,13 @@ object Main extends PlayJsonSupport {
     def updateMoviePastStat(view: View, movie: Movie): Movie = {
       view.viewCategory match {
         case "start_only" => {
-          movie.copy(id = view.id, title = view.title, viewCount = movie.viewCount + 1, stats = movie.stats.copy(past = movie.stats.past.copy(startOnly = movie.stats.past.startOnly + 1)))
+          movie.copy(id = view.id.get, title = view.title, viewCount = movie.viewCount + 1, stats = movie.stats.copy(past = movie.stats.past.copy(startOnly = movie.stats.past.startOnly + 1)))
         }
         case "half" => {
-          movie.copy(id = view.id, title = view.title, viewCount = movie.viewCount + 1, stats = movie.stats.copy(past = movie.stats.past.copy(half = movie.stats.past.half + 1)))
+          movie.copy(id = view.id.get, title = view.title, viewCount = movie.viewCount + 1, stats = movie.stats.copy(past = movie.stats.past.copy(half = movie.stats.past.half + 1)))
         }
         case "full" => {
-          movie.copy(id = view.id, title = view.title, viewCount = movie.viewCount + 1, stats = movie.stats.copy(past = movie.stats.past.copy(full = movie.stats.past.full + 1)))
+          movie.copy(id = view.id.get, title = view.title, viewCount = movie.viewCount + 1, stats = movie.stats.copy(past = movie.stats.past.copy(full = movie.stats.past.full + 1)))
         }
       }
     }

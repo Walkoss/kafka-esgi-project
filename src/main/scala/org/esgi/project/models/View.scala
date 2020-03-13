@@ -7,17 +7,17 @@ import play.api.libs.json._
 import play.api.libs.json.Reads._
 import play.api.libs.functional.syntax._
 
-case class View(id: Int, title: String, viewCategory: String)
+case class View(id: Option[Int], title: String = "", viewCategory: String = "")
 
 object View {
   val viewReads: Reads[View] = (
-    (JsPath \ "_id").read[Int] and
+    (JsPath \ "_id").readNullable[Int] and
       (JsPath \ "title").read[String] and
       (JsPath \ "view_category").read[String]
     ) (View.apply _)
 
   val viewWrites: Writes[View] = (
-    (JsPath \ "_id").write[Int] and
+    (JsPath \ "_id").writeNullable[Int] and
       (JsPath \ "title").write[String] and
       (JsPath \ "view_category").write[String]
     ) (unlift(View.unapply))

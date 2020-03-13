@@ -6,16 +6,16 @@ import play.api.libs.json._
 import play.api.libs.json.Reads._
 import play.api.libs.functional.syntax._
 
-case class Like(id: Int, score: Double)
+case class Like(id: Option[Int], score: Double = 0)
 
 object Like {
   val likeReads: Reads[Like] = (
-    (JsPath \ "_id").read[Int] and
+    (JsPath \ "_id").readNullable[Int] and
       (JsPath \ "score").read[Double]
     ) (Like.apply _)
 
   val likeWrites: Writes[Like] = (
-    (JsPath \ "_id").write[Int] and
+    (JsPath \ "_id").writeNullable[Int] and
       (JsPath \ "score").write[Double]
     ) (unlift(Like.unapply))
 
