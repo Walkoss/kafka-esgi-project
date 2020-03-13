@@ -16,7 +16,7 @@ import org.apache.kafka.streams.scala._
 import org.apache.kafka.streams.scala.kstream.{TimeWindowedKStream, _}
 import org.apache.kafka.streams.state.{KeyValueIterator, QueryableStoreTypes, ReadOnlyKeyValueStore, ReadOnlyWindowStore, WindowStoreIterator}
 import org.apache.kafka.streams.{KafkaStreams, StreamsConfig, Topology}
-import org.esgi.project.models.{Error, Like, Movie, MovieLike, MovieLikes, MovieStats, Stat, View}
+import org.esgi.project.models.{Error, Like, Movie, MovieLike, MovieLikes, MovieStats, Stat, TopLikes, TopViews, View}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.json.Json
 
@@ -170,10 +170,11 @@ object Main extends PlayJsonSupport {
           get {
             val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
             val movieIterator: KeyValueIterator[String, Movie] = viewsGroupedByMovieCountStore.all()
-            val sorted: List[Movie] = movieIterator.asScala.toList.map(x => x.value).sortBy(_.viewCount)
+            val sorted: List[TopViews] = movieIterator.asScala.toList.map(x => TopViews(title = x.value.title, views = x.value.viewCount)).sortBy(_.views)
             segment match {
               case "best" => complete(sorted.reverse.take(10))
               case "worst" => complete(sorted.take(10))
+              case _ => complete(404, Error(message = s"Incorrect type (got $segment, must be best or worst)"))
             }
           }
         }
@@ -183,10 +184,13 @@ object Main extends PlayJsonSupport {
           get {
             val likesGroupedByMovieStore: ReadOnlyKeyValueStore[String, MovieLikes] = streams.store(movieLikesGroupedByMovieStoreName, QueryableStoreTypes.keyValueStore[String, MovieLikes]())
             val movieIterator: KeyValueIterator[String, MovieLikes] = likesGroupedByMovieStore.all()
-            val sorted: List[MovieLikes] = movieIterator.asScala.toList.map(x => x.value.copy(score = x.value.score / x.value.movieLikesCount)).sortBy(_.score)
+            val sorted: List[TopLikes] = movieIterator.asScala.toList.map(x => {
+              TopLikes(title = x.value.title, score = x.value.score / x.value.movieLikesCount)
+            }).sortBy(_.score)
             segment match {
               case "best" => complete(sorted.reverse.take(10))
               case "worst" => complete(sorted.take(10))
+              case _ => complete(404, Error(message = s"Incorrect type (got $segment, must be best or worst)"))
             }
           }
         }
