@@ -132,10 +132,15 @@ object Main extends PlayJsonSupport {
     builder.build()
   }
 
-
   def routes(): Route = {
     concat(
-      path("movies" / IntNumber) { id: Int =>
+      path("movies") {
+        get {
+          val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
+          val movies: List[Movie] = viewsGroupedByMovieCountStore.all().asScala.map(_.value).toList
+          complete(movies)
+        }
+      }, path("movies" / IntNumber) { id: Int =>
         get {
           val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
           val movie = viewsGroupedByMovieCountStore.get(id.toString)
@@ -157,8 +162,7 @@ object Main extends PlayJsonSupport {
             case _ => complete((404, Error(message = s"Movie $id not found")))
           }
         }
-      },
-      path("stats" / "ten" / Segment / "views") {
+      }, path("stats" / "ten" / Segment / "views") {
         segment: String => {
           get {
             val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
@@ -171,8 +175,7 @@ object Main extends PlayJsonSupport {
             }
           }
         }
-      },
-      path("stats" / "ten" / Segment / "score") {
+      }, path("stats" / "ten" / Segment / "score") {
         segment: String => {
           get {
             val likesGroupedByMovieStore: ReadOnlyKeyValueStore[String, MovieLikes] = streams.store(movieLikesGroupedByMovieStoreName, QueryableStoreTypes.keyValueStore[String, MovieLikes]())
