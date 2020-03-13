@@ -16,7 +16,7 @@ import org.apache.kafka.streams.scala._
 import org.apache.kafka.streams.scala.kstream.{TimeWindowedKStream, _}
 import org.apache.kafka.streams.state.{KeyValueIterator, QueryableStoreTypes, ReadOnlyKeyValueStore, ReadOnlyWindowStore, WindowStoreIterator}
 import org.apache.kafka.streams.{KafkaStreams, StreamsConfig, Topology}
-import org.esgi.project.models.{Error, Like, Movie, MovieLike, MovieLikes, MovieStats, Stat, TopLikes, TopViews, View}
+import org.esgi.project.models.{Error, Like, Movie, MovieLikes, MovieStats, Stat, TopLikes, TopViews, View}
 import org.slf4j.{Logger, LoggerFactory}
 import play.api.libs.json.Json
 
@@ -69,22 +69,14 @@ object Main extends PlayJsonSupport {
     val likesStream: KStream[String, Like] = builder.stream[String, String]("likes")
       .mapValues(value => Json.parse(value).as[Like])
 
-    val viewsLikesStream = viewsStream
-      .join(likesStream)(
-        (view: View, like: Like) => {
-          MovieLike(title = view.title, score = like.score)
-        },
-        JoinWindows.of(30.seconds.toMillis)
-      )(Joined.`with`(Serdes.String, View.serdes, Like.serdes))
-
     // Views grouped by movie
     val viewsGroupedByMovie: KGroupedStream[String, View] = viewsStream.groupByKey(Serialized.`with`(Serdes.String, View.serdes))
 
     // View likes grouped by movie
-    val viewsLikesGroupedByMovie: KGroupedStream[String, MovieLike] = viewsLikesStream.groupByKey(Serialized.`with`(Serdes.String, MovieLike.serdes))
-    viewsLikesGroupedByMovie.aggregate(MovieLikes()
-    )((_: String, v: MovieLike, ml: MovieLikes) => {
-      ml.copy(title = v.title, movieLikesCount = ml.movieLikesCount + 1, score = ml.score + v.score)
+    val likesGrouppedByMovie: KGroupedStream[String, Like] = likesStream.groupByKey(Serialized.`with`(Serdes.String, Like.serdes))
+    likesGrouppedByMovie.aggregate(MovieLikes()
+    )((_: String, v: Like, ml: MovieLikes) => {
+      ml.copy(id = v.id, movieLikesCount = ml.movieLikesCount + 1, score = ml.score + v.score)
     })(Materialized.as(movieLikesGroupedByMovieStoreName).withValueSerde(MovieLikes.serdes))
 
     val viewsGroupedByMovie1min: TimeWindowedKStream[String, View] = viewsGroupedByMovie
@@ -183,10 +175,15 @@ object Main extends PlayJsonSupport {
         segment: String => {
           get {
             val likesGroupedByMovieStore: ReadOnlyKeyValueStore[String, MovieLikes] = streams.store(movieLikesGroupedByMovieStoreName, QueryableStoreTypes.keyValueStore[String, MovieLikes]())
+            val viewsGroupedByMovieCountStore: ReadOnlyKeyValueStore[String, Movie] = streams.store(viewsGroupedByMovieFullStoreName, QueryableStoreTypes.keyValueStore[String, Movie]())
+
             val movieIterator: KeyValueIterator[String, MovieLikes] = likesGroupedByMovieStore.all()
-            val sorted: List[TopLikes] = movieIterator.asScala.toList.map(x => {
-              TopLikes(title = x.value.title, score = x.value.score / x.value.movieLikesCount)
-            }).sortBy(_.score)
+            val sorted: List[TopLikes] = movieIterator.asScala.toList.map(movieLikes => {
+              val movie: Movie = viewsGroupedByMovieCountStore.get(movieLikes.key)
+              (movie, movieLikes.value)
+            }).filter((x) => {
+              Option(x._1).isDefined
+            }).map(x => TopLikes(title = x._1.title, score = x._2.score / x._2.movieLikesCount)).sortBy(_.score)
             segment match {
               case "best" => complete(sorted.reverse.take(10))
               case "worst" => complete(sorted.take(10))
